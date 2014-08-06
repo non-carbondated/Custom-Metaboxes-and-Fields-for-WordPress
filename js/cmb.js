@@ -311,20 +311,25 @@ window.CMB = (function(window, document, $, undefined){
 
 			$newInput
 				.removeClass( 'hasDatepicker' )
-				.attr( attrs ).val('');
+				.attr( attrs );
 
+			// Don't clear the value for radio or checkbox inputs else they won't save any value
+			if ( 'LABEL' !== $newInput.prop('tagName') && 'checkbox' !== $newInput.attr('type') && 'radio' !== $newInput.attr('type') ){
+				$newInput.val('');
+			}
 			// wysiwyg field
 			if ( isEditor ) {
-				// Get new wysiwyg ID
-				newID = newID ? oldID.replace( 'zx'+ prevNum, 'zx'+ cmb.idNumber ) : '';
 				// Empty the contents
 				$newInput.html('');
 				// Get wysiwyg field
 				var $wysiwyg = $newInput.parents( '.cmb-type-wysiwyg' );
 				// Remove extra mce divs
-				$wysiwyg.find('.mce-tinymce:not(:first-child)').remove();
+				$wysiwyg.find('.mce-tinymce').remove();
+				$wysiwyg.find('.quicktags-toolbar').remove();
 				// Replace id instances
 				var html = $wysiwyg.html().replace( new RegExp( oldID, 'g' ), newID );
+				// Reset the tabs to have Visual mode active
+				html = html.replace( new RegExp( 'html-active', 'g' ), 'tmce-active' );
 				// Update field html
 				$wysiwyg.html( html );
 				// Save ids for later to re-init tinymce
@@ -333,6 +338,11 @@ window.CMB = (function(window, document, $, undefined){
 
 			cmb.$focus = cmb.$focus ? cmb.$focus : $newInput;
 		});
+
+		var pattern = '_'+prevNum+'_';
+		var replace = '_'+(prevNum+1)+'_';
+		$self.html($self.html().replace(new RegExp(pattern, 'g'), replace));
+		$self.find('textarea').attr('style', '');
 
 		return this;
 	};
@@ -391,10 +401,9 @@ window.CMB = (function(window, document, $, undefined){
 					}
 					tinyMCEPreInit.qtInit[ id ] = newQTS;
 				}
-				tinyMCE.init({
-					id : tinyMCEPreInit.mceInit[ id ],
-				});
-
+				tinymce.init( tinyMCEPreInit.mceInit[ id ] );
+				quicktags( tinyMCEPreInit.qtInit[ id ] );
+				QTags._buttonsInit();
 			}
 		}
 
@@ -412,7 +421,7 @@ window.CMB = (function(window, document, $, undefined){
 			return false;
 		}
 
-		var prevNum = parseInt( $this.parents( '.repeatable-grouping' ).data( 'iterator' ) );
+		var prevNum = parseInt( $this.parents( '.repeatable-grouping' ).data( 'iterator' ), 10 );
 		var newNum  = prevNum - 1; // Subtract 1 to get new iterator number
 
 		// Update field name attributes so data is not orphaned when a row is removed and post is saved
@@ -424,7 +433,7 @@ window.CMB = (function(window, document, $, undefined){
 	};
 
 	cmb.emptyValue = function( event, row ) {
-		$('input:not([type="button"]), textarea', row).val('');
+		$('input:not([type="button"], [type="radio"], [type="checkbox"]), textarea', row).val('');
 	};
 
 	cmb.addGroupRow = function( event ) {
@@ -434,7 +443,7 @@ window.CMB = (function(window, document, $, undefined){
 		var $self    = $(this);
 		var $table   = $('#'+ $self.data('selector'));
 		var $oldRow  = $table.find('.repeatable-grouping').last();
-		var prevNum  = parseInt( $oldRow.data('iterator') );
+		var prevNum  = parseInt( $oldRow.data('iterator'), 10 );
 		cmb.idNumber = prevNum + 1;
 		var $row     = $oldRow.clone();
 
@@ -464,7 +473,7 @@ window.CMB = (function(window, document, $, undefined){
 		var tableselector = '#'+ $self.data('selector');
 		var $table        = $(tableselector);
 		var $emptyrow     = $table.find('.empty-row');
-		var prevNum       = parseInt( $emptyrow.find('[data-iterator]').data('iterator') );
+		var prevNum       = parseInt( $emptyrow.find('[data-iterator]').data('iterator'), 10 );
 		cmb.idNumber      = prevNum + 1;
 		var $row          = $emptyrow.clone();
 
@@ -484,11 +493,33 @@ window.CMB = (function(window, document, $, undefined){
 		var $parent = $self.parents('.repeatable-grouping');
 		var noRows  = $table.find('.repeatable-grouping').length;
 
-		// when a group is removed loop through all next groups and update fields names
-		$parent.nextAll( '.repeatable-grouping' ).find( cmb.repeatEls ).each( cmb.updateNameAttr );
+
+		// when a group is removed loop through all the remaining groups and shift the group field values up to the previous group
+		var $remainingGroups = $parent.nextAll( '.repeatable-grouping' );
+		$remainingGroups.each( function( index ){
+			if ( $(this).find('.move-up').length < 1 ){
+				// if the sorting links aren't present, create the necessary elements
+				var $div = $( "<div>", {class: "shift-rows move-up"} );
+				$(this).find('.cmb-nested-table').append( $div ).on( 'click', '.shift-rows', cmb.shiftRows );
+			}
+			// piggy-back on the shiftRows event handler
+			$(this).find('.move-up').trigger('click');
+		});
 
 		if ( noRows > 1 ) {
-			$parent.remove();
+			// remove the last group as we've finished shifting the values up
+			var $lastGroup = $( $table.find('.repeatable-grouping')[noRows - 1] );
+			$lastGroup.remove();
+
+			var id = $lastGroup.find('.wp-editor-area').attr('id');
+			if (id){
+				// reset to undefined to regenerate upon the add button
+				tinyMCEPreInit.mceInit[ id ] = undefined;
+				tinyMCEPreInit.qtInit[ id ] = undefined;
+
+				// remove the tinymce instance
+				tinymce.get(id).remove();
+			}
 			if ( noRows < 3 ) {
 				$table.find('.remove-group-row').prop('disabled', true);
 			} else {
@@ -535,12 +566,14 @@ window.CMB = (function(window, document, $, undefined){
 			if ( $element.hasClass('cmb_media_status') ) {
 				// special case for image previews
 				val = $element.html();
-			} else if ( 'checkbox' === $element.attr('type') ) {
+			} else if ( 'checkbox' === $element.attr('type') || 'radio' === $element.attr('type') ) {
 				val = $element.is(':checked');
 				cmb.log( 'checked', val );
 			} else if ( 'select' === $element.prop('tagName') ) {
 				val = $element.is(':selected');
 				cmb.log( 'checked', val );
+			} else if ( $element.hasClass('wp-editor-area') ) {
+				val = tinymce.get( $element.attr('id') ).getContent();
 			} else {
 				val = $element.val();
 			}
@@ -559,8 +592,8 @@ window.CMB = (function(window, document, $, undefined){
 				inputVals[ index ]['$'].html( val );
 
 			}
-			// handle checkbox swapping
-			else if ( 'checkbox' === $element.attr('type') ) {
+			// handle checkbox and radio swapping
+			else if ( 'checkbox' === $element.attr('type') || 'radio' === $element.attr('type') ) {
 				inputVals[ index ]['$'].prop( 'checked', $element.is(':checked') );
 				$element.prop( 'checked', inputVals[ index ]['val'] );
 			}
@@ -568,6 +601,11 @@ window.CMB = (function(window, document, $, undefined){
 			else if ( 'select' === $element.prop('tagName') ) {
 				inputVals[ index ]['$'].prop( 'selected', $element.is(':selected') );
 				$element.prop( 'selected', inputVals[ index ]['val'] );
+			}
+			// handle tinymce swapping
+			else if ( $element.hasClass('wp-editor-area') ) {
+				tinymce.get( inputVals[ index ]['$'].attr('id') ).setContent( tinymce.get( $element.attr('id') ).getContent() );
+				tinymce.get( $element.attr('id') ).setContent( inputVals[ index ]['val'] );
 			}
 			// handle normal input swapping
 			else {
